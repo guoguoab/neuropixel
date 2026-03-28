@@ -1,0 +1,6 @@
+id,ecephys_probe_id,local_index,probe_horizontal_position,probe_vertical_position,anterior_posterior_ccf_coordinate,dorsal_ventral_ccf_coordinate,left_right_ccf_coordinate,ecephys_structure_id,ecephys_structure_acronym
+849705558,792645504,1,11,20,8165,3314,6862,215,APN
+849705560,792645504,2,59,40,8162,3307,6866,215,APN
+849705562,792645504,3,27,40,8160,3301,6871,215,APN
+849705564,792645504,4,43,60,8157,3295,6875,215,APN
+849705566,792645504,5,11,60,8155,3288,6879,215,APN
