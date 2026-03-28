@@ -57,12 +57,17 @@ grid.dimensions = annotation.shape
 
 grid.point_data["values"] = mask.flatten(order="F")
 
-surface = grid.contour([0.5])
+surface = (
+    grid.contour([0.5])
+    .extract_surface(algorithm="dataset_surface")
+    .triangulate()
+    .smooth(n_iter=120, relaxation_factor=0.01)
+)
 # -------------------------------
 # 3D 可视化
 # -------------------------------
 
 plotter = pv.Plotter()
-plotter.add_mesh(surface, color="lightgray")
+plotter.add_mesh(surface, color="purple", opacity=0.5, smooth_shading=True)
 plotter.show_grid()
 plotter.show()
