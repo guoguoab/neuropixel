@@ -6,7 +6,7 @@ from allensdk.brain_observatory.ecephys.ecephys_project_cache import EcephysProj
 # 1. 配置本地缓存目录
 # =========================
 # 这里改成你自己的路径
-output_dir = r"D:\allen_ecephys_cache"
+output_dir = r"D:\aneuropixel\neuropixel\ccf\test"
 os.makedirs(output_dir, exist_ok=True)
 
 manifest_path = os.path.join(output_dir, "manifest.json")

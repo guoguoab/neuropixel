@@ -1,0 +1,2 @@
+slide	sample	layer	region	merge_regions	total_cell_num	subclass	enrich_subclass_cell_ids_num	enrich_subclass_cell_ids	Glut_Neruon_cell_ids_num	Glut_Neruon_cell_ids	GABA_Neruon_cell_ids_num	GABA_Neruon_cell_ids
+C57BL6J-1.026	sample_1	layer 1	Orbital area, lateral part, layer 1,Secondary motor area, layer 1,Frontal pole, layer 1	regions_1	52	036 HPF CR Glut	1	1.17328199728401e+38	3	3.49474746663385e+37,8.03098778152838e+37,1.17328199728401e+38	3	1.55320007650695e+37,8.25225574970259e+37,2.95378229951986e+38

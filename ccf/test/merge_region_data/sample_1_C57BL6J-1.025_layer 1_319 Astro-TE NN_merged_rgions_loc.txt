@@ -1,0 +1,2 @@
+chip	sample	layer	subclass	merge_regions	xstart	ystart	xend	yend	loc_1	p
+C57BL6J-1.025	sample_1	layer 1	319 Astro-TE NN	regions_1	5.1818185231859	3.43526638534395	5.5818185231859	3.83526638534395	layer 1_5.1818185231859_3.43526638534395	0.0402959704029597
