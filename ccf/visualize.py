@@ -78,6 +78,15 @@ def load_units_from_region(channels_csv, units_csv, structure_acronym, voxel_res
     """
     region_channel_ids = set()
     channel_points = {}
+    skipped_channels = 0
+
+    def _safe_float(value):
+        if value is None:
+            return None
+        value = value.strip()
+        if value == "":
+            return None
+        return float(value)
 
     with open(channels_csv, "r", encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
@@ -85,13 +94,20 @@ def load_units_from_region(channels_csv, units_csv, structure_acronym, voxel_res
             if row["ecephys_structure_acronym"] != structure_acronym:
                 continue
 
+            ap = _safe_float(row.get("anterior_posterior_ccf_coordinate"))
+            dv = _safe_float(row.get("dorsal_ventral_ccf_coordinate"))
+            lr = _safe_float(row.get("left_right_ccf_coordinate"))
+            if ap is None or dv is None or lr is None:
+                skipped_channels += 1
+                continue
+
             channel_id = int(row["id"])
             region_channel_ids.add(channel_id)
             # Allen CCF 坐标是微米单位，25um 分辨率下需要缩放到 voxel 坐标
             channel_points[channel_id] = (
-                float(row["anterior_posterior_ccf_coordinate"]) / voxel_resolution_um,
-                float(row["dorsal_ventral_ccf_coordinate"]) / voxel_resolution_um,
-                float(row["left_right_ccf_coordinate"]) / voxel_resolution_um,
+                ap / voxel_resolution_um,
+                dv / voxel_resolution_um,
+                lr / voxel_resolution_um,
             )
 
     matched_units = []
@@ -100,7 +116,10 @@ def load_units_from_region(channels_csv, units_csv, structure_acronym, voxel_res
     with open(units_csv, "r", encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            channel_id = int(row["ecephys_channel_id"])
+            channel_id_str = (row.get("ecephys_channel_id") or "").strip()
+            if not channel_id_str:
+                continue
+            channel_id = int(channel_id_str)
             if channel_id not in region_channel_ids:
                 continue
 
@@ -111,6 +130,12 @@ def load_units_from_region(channels_csv, units_csv, structure_acronym, voxel_res
         points = np.asarray(points, dtype=float)
     else:
         points = np.empty((0, 3), dtype=float)
+
+    if skipped_channels > 0:
+        print(
+            f"Skipped {skipped_channels} channels in region {structure_acronym} "
+            "due to missing CCF coordinates."
+        )
 
     return points, matched_units, region_channel_ids
 # -------------------------------
