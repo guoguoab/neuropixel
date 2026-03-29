@@ -316,7 +316,7 @@ def _load_glut_gaba_points_from_merge_region(
 parser = argparse.ArgumentParser(description="在 3D CCF 小鼠脑内可视化神经元点")
 parser.add_argument("--channels-csv", default="test/channels.csv", help="channels.csv 路径")
 parser.add_argument("--units-csv", default="test/units.csv", help="units.csv 路径")
-parser.add_argument("--region", default="APN", help="目标脑区缩写（如 APN）")
+parser.add_argument("--region", default="VISl", help="目标脑区缩写（如 APN）")
 
 parser.add_argument(
     "--use-merge-region-data",
@@ -400,7 +400,7 @@ if args.use_merge_region_data:
             "[DEBUG] No Glut/GABA points matched. "
             "请检查 merge_region_data 与 spital_data 是否来自同一批次样本。"
         )
-else:
+
     unit_points, matched_units, region_channel_ids = load_units_from_region(
         channels_csv=args.channels_csv,
         units_csv=args.units_csv,
