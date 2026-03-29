@@ -151,12 +151,18 @@ def _split_id_list(raw_ids: str) -> Set[str]:
     return out
 
 
-def _pick_merge_region_row(merge_region_data_dir: str, seed: Optional[int] = None):
+def _pick_merge_region_row(
+    merge_region_data_dir: str,
+    seed: Optional[int] = None,
+    slide: Optional[str] = None,
+):
     table_files = [
         name
         for name in os.listdir(merge_region_data_dir)
         if name.endswith("_merged_regions_table_cell_id.txt")
     ]
+    if slide:
+        table_files = [name for name in table_files if slide in name]
     if not table_files:
         raise FileNotFoundError(
             f"No *_merged_regions_table_cell_id.txt file found in {merge_region_data_dir}"
@@ -198,9 +204,10 @@ def _load_glut_gaba_points_from_merge_region(
     spital_data_dir: str,
     voxel_resolution_um: int,
     seed: Optional[int] = None,
+    slide: Optional[str] = None,
 ):
     selected_file, row, row_index, total_rows = _pick_merge_region_row(
-        merge_region_data_dir, seed=seed
+        merge_region_data_dir, seed=seed, slide=slide
     )
 
     slide = _extract_slide_from_filename(selected_file)
@@ -345,6 +352,11 @@ parser.add_argument(
     default=None,
     help="随机选取 merge_region_data 文件时可选随机种子",
 )
+parser.add_argument(
+    "--merge-region-slides",
+    default="C57BL6J-1.025,C57BL6J-1.026",
+    help="逗号分隔的 slide 列表，每个 slide 随机选一个 merge_region 文件",
+)
 parser.set_defaults(use_merge_region_data=True)
 args = parser.parse_args()
 
@@ -356,46 +368,68 @@ if args.use_merge_region_data:
     print(f"[DEBUG] merge_region_data_dir = {args.merge_region_data_dir}")
     print(f"[DEBUG] spital_data_dir = {args.spital_data_dir}")
     print(f"[DEBUG] random_seed = {args.random_seed}")
-    merge_result = _load_glut_gaba_points_from_merge_region(
-        merge_region_data_dir=args.merge_region_data_dir,
-        spital_data_dir=args.spital_data_dir,
-        voxel_resolution_um=resolution,
-        seed=args.random_seed,
+    target_slides = [s.strip() for s in args.merge_region_slides.split(",") if s.strip()]
+    if not target_slides:
+        target_slides = ["C57BL6J-1.025", "C57BL6J-1.026"]
+
+    total_glut_points = []
+    total_gaba_points = []
+
+    for idx, slide in enumerate(target_slides):
+        merge_result = _load_glut_gaba_points_from_merge_region(
+            merge_region_data_dir=args.merge_region_data_dir,
+            spital_data_dir=args.spital_data_dir,
+            voxel_resolution_um=resolution,
+            seed=None if args.random_seed is None else args.random_seed + idx,
+            slide=slide,
+        )
+
+        print(f"Selected merge file ({slide}): {merge_result['selected_file']}")
+        print(
+            f"Selected row index ({slide}): {merge_result['selected_row_index']} / "
+            f"{merge_result['total_rows_in_file'] - 1}"
+        )
+        print(f"Selected merge_regions ({slide}): {merge_result['merge_regions']}")
+        print(f"Spatial file ({slide}): {merge_result['spatial_file']}")
+        print(
+            f"Glut ids total/matched ({slide}): "
+            f"{merge_result['glut_ids_total']}/{len(merge_result['glut_points'])}"
+        )
+        print(
+            f"GABA ids total/matched ({slide}): "
+            f"{merge_result['gaba_ids_total']}/{len(merge_result['gaba_points'])}"
+        )
+        print(f"Matched cell ids in spatial file ({slide}): {merge_result['matched_cell_ids']}")
+        print(f"Skipped rows due to missing CCF coords ({slide}): {merge_result['missing_coord_rows']}")
+
+        if len(merge_result["glut_points"]) > 0:
+            total_glut_points.append(merge_result["glut_points"])
+        if len(merge_result["gaba_points"]) > 0:
+            total_gaba_points.append(merge_result["gaba_points"])
+
+    glut_points = (
+        np.vstack(total_glut_points) if total_glut_points else np.empty((0, 3), dtype=float)
+    )
+    gaba_points = (
+        np.vstack(total_gaba_points) if total_gaba_points else np.empty((0, 3), dtype=float)
     )
 
-    print(f"Selected merge file: {merge_result['selected_file']}")
-    print(
-        f"Selected row index: {merge_result['selected_row_index']} / "
-        f"{merge_result['total_rows_in_file'] - 1}"
-    )
-    print(f"Selected merge_regions: {merge_result['merge_regions']}")
-    print(f"Slide: {merge_result['slide']}")
-    print(f"Spatial file: {merge_result['spatial_file']}")
-    print(
-        f"Glut ids total/matched: {merge_result['glut_ids_total']}/{len(merge_result['glut_points'])}"
-    )
-    print(
-        f"GABA ids total/matched: {merge_result['gaba_ids_total']}/{len(merge_result['gaba_points'])}"
-    )
-    print(f"Matched cell ids in spatial file: {merge_result['matched_cell_ids']}")
-    print(f"Skipped rows due to missing CCF coords: {merge_result['missing_coord_rows']}")
-
-    if len(merge_result["glut_points"]) > 0:
+    if len(glut_points) > 0:
         plotter.add_points(
-            merge_result["glut_points"],
+            glut_points,
             color="red",
             point_size=8,
             render_points_as_spheres=True,
         )
 
-    if len(merge_result["gaba_points"]) > 0:
+    if len(gaba_points) > 0:
         plotter.add_points(
-            merge_result["gaba_points"],
+            gaba_points,
             color="blue",
             point_size=8,
             render_points_as_spheres=True,
         )
-    if len(merge_result["glut_points"]) == 0 and len(merge_result["gaba_points"]) == 0:
+    if len(glut_points) == 0 and len(gaba_points) == 0:
         print(
             "[DEBUG] No Glut/GABA points matched. "
             "请检查 merge_region_data 与 spital_data 是否来自同一批次样本。"
@@ -415,7 +449,7 @@ if args.use_merge_region_data:
     if len(unit_points) > 0:
         plotter.add_points(
             unit_points,
-            color="blue",
+            color="green",
             point_size=8,
             render_points_as_spheres=True,
         )
