@@ -127,8 +127,8 @@ parser.add_argument(
 )
 parser.add_argument(
     "--units-csv",
-    default="test/unit.csv",
-    help="unit.csv 路径",
+    default="test/units.csv",
+    help="units.csv 路径",
 )
 parser.add_argument(
     "--region",
