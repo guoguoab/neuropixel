@@ -26,7 +26,7 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import ExtraTreesClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.metrics import auc, classification_report, confusion_matrix, roc_curve
 from sklearn.model_selection import GroupShuffleSplit
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.pipeline import Pipeline
@@ -222,7 +222,7 @@ def build_model_candidates(random_state: int) -> Dict[str, Pipeline]:
                         gamma="scale",
                         kernel="rbf",
                         class_weight="balanced",
-                        probability=False,
+                        probability=True,
                         random_state=random_state,
                     ),
                 ),
@@ -252,18 +252,78 @@ def build_model_candidates(random_state: int) -> Dict[str, Pipeline]:
     }
 
 
+def explain_feature_design(output_dir: Path) -> None:
+    feature_lines = [
+        "# 输入特征说明（unit 级别）",
+        "",
+        "本脚本以每个 unit 的放电时间序列（spike_times）为输入，提取 11 个统计特征。",
+        "",
+        "1) spike_count：总脉冲数。反映神经元整体活跃程度。",
+        "2) duration_s：记录时长（末次-首次 spike）。用于区分“高频短时”与“低频长时”。",
+        "3) firing_rate_hz：平均放电率（count/duration）。不同脑区神经元基线放电率常有差异。",
+        "4) isi_mean_s：ISI（相邻 spike 间隔）均值。描述平均节律。",
+        "5) isi_std_s：ISI 标准差。衡量放电节律离散度。",
+        "6) isi_cv：ISI 变异系数（std/mean）。是无量纲不规则性指标，便于跨单元比较。",
+        "7) isi_median_s：ISI 中位数。相比均值更抗异常值。",
+        "8) isi_p10_s：ISI 10 分位数。刻画短间隔行为，常与 burst 倾向相关。",
+        "9) isi_p90_s：ISI 90 分位数。刻画长尾停顿行为。",
+        "10) burst_ratio_isi_lt10ms：ISI<10ms 比例。直接描述 burst 放电倾向。",
+        "11) fano_1s：1 秒分箱计数的 Fano 因子（var/mean）。反映跨时间窗放电稳定性。",
+        "",
+        "## 为什么选这些特征",
+        "- **可解释性强**：都对应常见神经电生理统计量，便于分析不同脑区差异来源。",
+        "- **稳健性好**：均值/分位数/CV/Fano 组合可兼顾中心趋势、离散度与尾部行为。",
+        "- **覆盖互补信息**：同时包含总量（count/rate）、时间结构（ISI）、突发性（burst）和稳定性（Fano）。",
+        "- **工程可用**：仅依赖 spike time，不依赖波形原始电压，适合跨会话快速训练。",
+    ]
+    with open(output_dir / "feature_explanation.md", "w", encoding="utf-8") as f:
+        f.write("\n".join(feature_lines) + "\n")
+
+
+def predict_scores(model: Pipeline, x_test: np.ndarray) -> np.ndarray:
+    clf = model.named_steps["clf"]
+    if hasattr(clf, "predict_proba"):
+        return model.predict_proba(x_test)
+    if hasattr(clf, "decision_function"):
+        scores = model.decision_function(x_test)
+        if scores.ndim == 1:
+            return np.column_stack([-scores, scores])
+        return scores
+    pred = model.predict(x_test)
+    classes = model.classes_
+    hard_scores = np.zeros((pred.size, classes.size), dtype=float)
+    for idx, cls in enumerate(classes):
+        hard_scores[:, idx] = (pred == cls).astype(float)
+    return hard_scores
+
+
+def micro_ovr_auc_curve(y_true: np.ndarray, score: np.ndarray, classes: np.ndarray) -> Tuple[np.ndarray, np.ndarray, float]:
+    if classes.size == 2 and score.shape[1] == 2:
+        pos_label = classes[1]
+        y_true_binary = (y_true == pos_label).astype(int)
+        fpr, tpr, _ = roc_curve(y_true_binary, score[:, 1])
+        return fpr, tpr, float(auc(fpr, tpr))
+
+    y_bin = np.zeros((y_true.size, classes.size), dtype=int)
+    for idx, cls in enumerate(classes):
+        y_bin[:, idx] = (y_true == cls).astype(int)
+    fpr, tpr, _ = roc_curve(y_bin.ravel(), score.ravel())
+    return fpr, tpr, float(auc(fpr, tpr))
+
+
 def train_and_select_model(
     X: np.ndarray,
     y: np.ndarray,
     groups: np.ndarray,
     test_size: float,
     random_state: int,
-) -> Tuple[Pipeline, str, dict, np.ndarray, np.ndarray]:
+) -> Tuple[Pipeline, str, dict, np.ndarray, np.ndarray, List[dict]]:
     splitter = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=random_state)
     train_idx, test_idx = next(splitter.split(X, y, groups=groups))
 
     candidates = build_model_candidates(random_state=random_state)
     model_results = []
+    auc_curves = []
     best_model = None
     best_model_name = ""
     best_pred = None
@@ -277,6 +337,9 @@ def train_and_select_model(
         weighted_f1 = float(report["weighted avg"]["f1-score"])
         macro_f1 = float(report["macro avg"]["f1-score"])
         accuracy = float(report["accuracy"])
+        score = predict_scores(model, X[test_idx])
+        model_classes = np.asarray(model.classes_)
+        fpr, tpr, model_auc = micro_ovr_auc_curve(y[test_idx], score, model_classes)
 
         model_results.append(
             {
@@ -284,6 +347,15 @@ def train_and_select_model(
                 "accuracy": accuracy,
                 "weighted_f1": weighted_f1,
                 "macro_f1": macro_f1,
+                "roc_auc": model_auc,
+            }
+        )
+        auc_curves.append(
+            {
+                "model": model_name,
+                "fpr": fpr.tolist(),
+                "tpr": tpr.tolist(),
+                "roc_auc": model_auc,
             }
         )
 
@@ -306,11 +378,12 @@ def train_and_select_model(
         "n_train": int(train_idx.size),
         "n_test": int(test_idx.size),
         "candidate_models": model_results,
+        "auc_curves": auc_curves,
         "classes_test": cm_labels,
         "classification_report": best_report,
         "confusion_matrix": cm.tolist(),
     }
-    return best_model, best_model_name, metrics, y[test_idx], best_pred
+    return best_model, best_model_name, metrics, y[test_idx], best_pred, auc_curves
 
 
 def plot_model_comparison(model_results: List[dict], output_dir: Path) -> None:
@@ -335,6 +408,25 @@ def plot_model_comparison(model_results: List[dict], output_dir: Path) -> None:
     ax.legend()
     fig.tight_layout()
     fig.savefig(output_dir / "model_comparison.png", dpi=160)
+    plt.close(fig)
+
+
+def plot_model_auc_curves(auc_curves: List[dict], output_dir: Path) -> None:
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(9, 7))
+    for rec in sorted(auc_curves, key=lambda x: x["roc_auc"], reverse=True):
+        ax.plot(rec["fpr"], rec["tpr"], lw=2, label=f'{rec["model"]} (AUC={rec["roc_auc"]:.3f})')
+    ax.plot([0, 1], [0, 1], "k--", lw=1.2, alpha=0.7, label="chance")
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.02)
+    ax.set_xlabel("False Positive Rate")
+    ax.set_ylabel("True Positive Rate")
+    ax.set_title("ROC-AUC curves across candidate models (micro-averaged OvR)")
+    ax.grid(alpha=0.25)
+    ax.legend(loc="lower right", fontsize=9)
+    fig.tight_layout()
+    fig.savefig(output_dir / "model_auc_curves.png", dpi=170)
     plt.close(fig)
 
 
@@ -380,7 +472,9 @@ def main() -> None:
 
     X, y, groups = build_dataset(labels, spikes_by_unit)
 
-    model, model_name, metrics, y_test, pred_test = train_and_select_model(
+    explain_feature_design(args.output_dir)
+
+    model, model_name, metrics, y_test, pred_test, auc_curves = train_and_select_model(
         X=X,
         y=y,
         groups=groups,
@@ -419,6 +513,7 @@ def main() -> None:
 
     try:
         plot_model_comparison(metrics["candidate_models"], args.output_dir)
+        plot_model_auc_curves(auc_curves, args.output_dir)
         plot_confusion_matrix(y_test, pred_test, metrics["classes_test"], args.output_dir)
     except ModuleNotFoundError as exc:
         print(f"[warn] plotting skipped because dependency is missing: {exc}")
