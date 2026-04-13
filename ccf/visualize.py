@@ -1,8 +1,10 @@
 import argparse
+import colorsys
 import csv
 import os
 import random
 import re
+from collections import defaultdict
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import numpy as np
@@ -126,6 +128,80 @@ def load_units_from_region(channels_csv, units_csv, structure_acronym, voxel_res
         )
 
     return points, matched_units, region_channel_ids
+
+
+def load_units_grouped_by_region(channels_csv, units_csv, voxel_resolution_um):
+    """
+    从 channels.csv + units.csv 中加载所有脑区的 unit 点，返回按脑区分组的数据。
+    """
+    channel_points: Dict[int, Tuple[float, float, float]] = {}
+    channel_to_region: Dict[int, str] = {}
+    skipped_channels = 0
+
+    def _safe_float(value):
+        if value is None:
+            return None
+        value = value.strip()
+        if value == "":
+            return None
+        return float(value)
+
+    with open(channels_csv, "r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            region = (row.get("ecephys_structure_acronym") or "").strip()
+            if not region:
+                continue
+
+            ap = _safe_float(row.get("anterior_posterior_ccf_coordinate"))
+            dv = _safe_float(row.get("dorsal_ventral_ccf_coordinate"))
+            lr = _safe_float(row.get("left_right_ccf_coordinate"))
+            if ap is None or dv is None or lr is None:
+                skipped_channels += 1
+                continue
+
+            channel_id = int(row["id"])
+            channel_to_region[channel_id] = region
+            channel_points[channel_id] = (
+                ap / voxel_resolution_um,
+                dv / voxel_resolution_um,
+                lr / voxel_resolution_um,
+            )
+
+    region_points: Dict[str, List[Tuple[float, float, float]]] = defaultdict(list)
+    region_channel_ids: Dict[str, Set[int]] = defaultdict(set)
+
+    for channel_id, region in channel_to_region.items():
+        region_channel_ids[region].add(channel_id)
+
+    with open(units_csv, "r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            channel_id_str = (row.get("ecephys_channel_id") or "").strip()
+            if not channel_id_str:
+                continue
+            channel_id = int(channel_id_str)
+            region = channel_to_region.get(channel_id)
+            if region is None:
+                continue
+            region_points[region].append(channel_points[channel_id])
+
+    region_points_np = {
+        region: np.asarray(points, dtype=float) if points else np.empty((0, 3), dtype=float)
+        for region, points in region_points.items()
+    }
+
+    return region_points_np, region_channel_ids, skipped_channels
+
+
+def _generate_distinct_colors(n: int):
+    if n <= 0:
+        return []
+    colors = []
+    for i in range(n):
+        hue = i / n
+        colors.append(colorsys.hsv_to_rgb(hue, 0.85, 0.95))
+    return colors
 
 
 def _id_key(raw_id: str) -> Optional[str]:
@@ -323,7 +399,11 @@ def _load_glut_gaba_points_from_merge_region(
 parser = argparse.ArgumentParser(description="在 3D CCF 小鼠脑内可视化神经元点")
 parser.add_argument("--channels-csv", default="test/channels.csv", help="channels.csv 路径")
 parser.add_argument("--units-csv", default="test/units.csv", help="units.csv 路径")
-parser.add_argument("--region", default="VISl", help="目标脑区缩写（如 APN）")
+parser.add_argument(
+    "--region",
+    default="ALL",
+    help="目标脑区缩写（如 APN）；默认 ALL 表示可视化所有脑区",
+)
 
 parser.add_argument(
     "--use-merge-region-data",
@@ -435,6 +515,7 @@ if args.use_merge_region_data:
             "请检查 merge_region_data 与 spital_data 是否来自同一批次样本。"
         )
 
+if args.region and args.region.upper() != "ALL":
     unit_points, matched_units, region_channel_ids = load_units_from_region(
         channels_csv=args.channels_csv,
         units_csv=args.units_csv,
@@ -453,8 +534,49 @@ if args.use_merge_region_data:
             point_size=8,
             render_points_as_spheres=True,
         )
+        plotter.add_legend([["Neuropixels units", "green"]], loc="right")
     else:
         print(f"No units found for region {args.region}")
+else:
+    region_points_map, region_channel_ids_map, skipped_channels = load_units_grouped_by_region(
+        channels_csv=args.channels_csv,
+        units_csv=args.units_csv,
+        voxel_resolution_um=resolution,
+    )
+
+    sorted_regions = sorted(region_points_map.keys())
+    region_colors = _generate_distinct_colors(len(sorted_regions))
+    legend_entries = []
+
+    for region, color in zip(sorted_regions, region_colors):
+        points = region_points_map[region]
+        if len(points) == 0:
+            continue
+        plotter.add_points(
+            points,
+            color=color,
+            point_size=7,
+            render_points_as_spheres=True,
+        )
+        legend_entries.append([f"{region} (n={len(points)})", color])
+        print(
+            f"Region: {region}, Matched channels: {len(region_channel_ids_map.get(region, set()))}, "
+            f"Matched units: {len(points)}"
+        )
+
+    if skipped_channels > 0:
+        print(f"Skipped channels due to missing CCF coordinates: {skipped_channels}")
+
+    if legend_entries:
+        plotter.add_legend(
+            legend_entries,
+            bcolor=(1, 1, 1),
+            face="circle",
+            size=(0.25, 0.8),
+            loc="right",
+        )
+    else:
+        print("No units found in any region.")
 
 plotter.show_grid()
 plotter.show()
