@@ -231,6 +231,7 @@ def _pick_merge_region_row(
     merge_region_data_dir: str,
     seed: Optional[int] = None,
     slide: Optional[str] = None,
+    min_total_cells: int = 0,
 ):
     table_files = [
         name
@@ -255,7 +256,26 @@ def _pick_merge_region_row(
     if not rows:
         raise ValueError(f"No row found in {selected_path}")
 
-    row = rng.choice(rows)
+    candidate_rows = []
+    for row in rows:
+        glut_n = len(_split_id_list(row.get("Glut_Neruon_cell_ids", "")))
+        gaba_n = len(_split_id_list(row.get("GABA_Neruon_cell_ids", "")))
+        total_n = glut_n + gaba_n
+        if total_n >= min_total_cells:
+            candidate_rows.append(row)
+
+    if candidate_rows:
+        row = rng.choice(candidate_rows)
+    else:
+        row = max(
+            rows,
+            key=lambda r: len(_split_id_list(r.get("Glut_Neruon_cell_ids", "")))
+            + len(_split_id_list(r.get("GABA_Neruon_cell_ids", ""))),
+        )
+        print(
+            f"[WARN] No row reached min_total_cells={min_total_cells} in {selected_file}. "
+            "Fallback to row with maximum cell count."
+        )
     row_index = rows.index(row)
     return selected_file, row, row_index, len(rows)
 
@@ -281,9 +301,10 @@ def _load_glut_gaba_points_from_merge_region(
     voxel_resolution_um: int,
     seed: Optional[int] = None,
     slide: Optional[str] = None,
+    min_total_cells: int = 0,
 ):
     selected_file, row, row_index, total_rows = _pick_merge_region_row(
-        merge_region_data_dir, seed=seed, slide=slide
+        merge_region_data_dir, seed=seed, slide=slide, min_total_cells=min_total_cells
     )
 
     slide = _extract_slide_from_filename(selected_file)
@@ -437,10 +458,18 @@ parser.add_argument(
     default="C57BL6J-1.025,C57BL6J-1.026",
     help="逗号分隔的 slide 列表，每个 slide 随机选一个 merge_region 文件",
 )
+parser.add_argument(
+    "--min-merge-total-cells",
+    type=int,
+    default=500,
+    help="选择 merge_region 行时要求 Glut+GABA 总细胞数下限；若无满足则回退到最大细胞数行",
+)
 parser.set_defaults(use_merge_region_data=True)
 args = parser.parse_args()
 
 plotter = pv.Plotter()
+plotter.set_background("white")
+pv.global_theme.font.color = "black"
 plotter.add_mesh(surface, color="purple", opacity=0.5, smooth_shading=True)
 
 if args.use_merge_region_data:
@@ -462,6 +491,7 @@ if args.use_merge_region_data:
             voxel_resolution_um=resolution,
             seed=None if args.random_seed is None else args.random_seed + idx,
             slide=slide,
+            min_total_cells=args.min_merge_total_cells,
         )
 
         print(f"Selected merge file ({slide}): {merge_result['selected_file']}")
@@ -509,6 +539,19 @@ if args.use_merge_region_data:
             point_size=8,
             render_points_as_spheres=True,
         )
+    merge_legend_entries = []
+    if len(glut_points) > 0:
+        merge_legend_entries.append(["Glut (red)", "red"])
+    if len(gaba_points) > 0:
+        merge_legend_entries.append(["GABA (blue)", "blue"])
+    if merge_legend_entries:
+        plotter.add_legend(
+            merge_legend_entries,
+            loc="upper right",
+            bcolor=(1, 1, 1),
+            background_opacity=0.0,
+            border=False,
+        )
     if len(glut_points) == 0 and len(gaba_points) == 0:
         print(
             "[DEBUG] No Glut/GABA points matched. "
@@ -534,7 +577,12 @@ if args.region and args.region.upper() != "ALL":
             point_size=8,
             render_points_as_spheres=True,
         )
-        plotter.add_legend([["Neuropixels units", "green"]], loc="center right")
+        plotter.add_legend(
+            [["Neuropixels units", "green"]],
+            loc="center right",
+            bcolor=(1, 1, 1),
+            background_opacity=0.0,
+        )
     else:
         print(f"No units found for region {args.region}")
 else:
@@ -574,9 +622,12 @@ else:
             face="circle",
             size=(0.25, 0.8),
             loc="center right",
+            background_opacity=0.0,
         )
     else:
         print("No units found in any region.")
 
-plotter.show_grid()
+plotter.view_xy()
+plotter.camera.up = (0, 1, 0)
+plotter.reset_camera()
 plotter.show()
