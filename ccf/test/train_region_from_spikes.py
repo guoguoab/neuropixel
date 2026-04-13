@@ -56,18 +56,6 @@ def parse_args() -> argparse.Namespace:
         default=Path("outputs_region_model"),
         help="Directory to save metrics/artifacts.",
     )
-    parser.add_argument(
-        "--input-repr",
-        choices=["stats", "sequence"],
-        default="stats",
-        help="Feature representation: handcrafted stats or direct spike-time sequence.",
-    )
-    parser.add_argument(
-        "--sequence-length",
-        type=int,
-        default=256,
-        help="Fixed sequence length for --input-repr sequence.",
-    )
     return parser.parse_args()
 
 
@@ -166,49 +154,7 @@ def spike_features(spike_times: np.ndarray) -> np.ndarray:
     )
 
 
-
-def spike_time_sequence_features(spike_times: np.ndarray, sequence_length: int) -> np.ndarray:
-    """Convert one spike train into a fixed-length direct spike-time sequence."""
-    if sequence_length <= 0:
-        raise ValueError("sequence_length must be > 0")
-
-    feats = np.zeros(sequence_length, dtype=float)
-    if spike_times.size == 0:
-        return feats
-
-    shifted = spike_times - spike_times[0]
-    duration = float(shifted[-1]) if shifted.size >= 2 else 0.0
-
-    if duration > 0:
-        shifted = shifted / duration
-    else:
-        shifted = np.zeros_like(shifted)
-
-    n = min(sequence_length, shifted.size)
-    feats[:n] = shifted[:n]
-
-    if n < sequence_length:
-        feats[n:] = -1.0
-    return feats
-
-
-def extract_features(
-    spike_times: np.ndarray,
-    input_repr: str,
-    sequence_length: int,
-) -> np.ndarray:
-    if input_repr == "stats":
-        return spike_features(spike_times)
-    if input_repr == "sequence":
-        return spike_time_sequence_features(spike_times, sequence_length)
-    raise ValueError(f"Unsupported input representation: {input_repr}")
-
-def build_dataset(
-    labels_df: pd.DataFrame,
-    spikes_by_unit: Dict[int, np.ndarray],
-    input_repr: str,
-    sequence_length: int,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def build_dataset(labels_df: pd.DataFrame, spikes_by_unit: Dict[int, np.ndarray]) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     rows: List[np.ndarray] = []
     y: List[str] = []
     groups: List[int] = []
@@ -218,7 +164,7 @@ def build_dataset(
         region = str(rec.region)
         if unit_id not in spikes_by_unit:
             continue
-        feats = extract_features(spikes_by_unit[unit_id], input_repr, sequence_length)
+        feats = spike_features(spikes_by_unit[unit_id])
         rows.append(feats)
         y.append(region)
         groups.append(int(rec.ecephys_channel_id))
@@ -283,18 +229,12 @@ def main() -> None:
     keep_regions = counts[counts >= args.min_units_per_region].index
     labels = labels[labels["region"].isin(keep_regions)].copy()
 
-    print(f"[features] input representation: {args.input_repr}")
     spikes_by_unit = load_spike_times_from_nwb(args.nwb)
     matched_labels = labels[labels["unit_id"].isin(spikes_by_unit.keys())]
     matched_region_count = matched_labels["region"].nunique()
     print(f"[nwb] 与NWB成功匹配的脑区数: {matched_region_count}")
 
-    X, y, groups = build_dataset(
-        labels,
-        spikes_by_unit,
-        input_repr=args.input_repr,
-        sequence_length=args.sequence_length,
-    )
+    X, y, groups = build_dataset(labels, spikes_by_unit)
 
     model, metrics = train_and_evaluate(
         X=X,
@@ -308,23 +248,20 @@ def main() -> None:
     with open(metrics_path, "w", encoding="utf-8") as f:
         json.dump(metrics, f, indent=2, ensure_ascii=False)
 
+    feature_names = [
+        "spike_count",
+        "duration_s",
+        "firing_rate_hz",
+        "isi_mean_s",
+        "isi_std_s",
+        "isi_cv",
+        "isi_median_s",
+        "isi_p10_s",
+        "isi_p90_s",
+        "burst_ratio_isi_lt10ms",
+        "fano_1s",
+    ]
     importances = model.named_steps["clf"].feature_importances_
-    if args.input_repr == "stats":
-        feature_names = [
-            "spike_count",
-            "duration_s",
-            "firing_rate_hz",
-            "isi_mean_s",
-            "isi_std_s",
-            "isi_cv",
-            "isi_median_s",
-            "isi_p10_s",
-            "isi_p90_s",
-            "burst_ratio_isi_lt10ms",
-            "fano_1s",
-        ]
-    else:
-        feature_names = [f"spike_time_seq_{i}" for i in range(args.sequence_length)]
     importance_df = pd.DataFrame(
         {"feature": feature_names, "importance": importances}
     ).sort_values("importance", ascending=False)
