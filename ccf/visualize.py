@@ -534,7 +534,7 @@ if args.region and args.region.upper() != "ALL":
             point_size=8,
             render_points_as_spheres=True,
         )
-        plotter.add_legend([["Neuropixels units", "green"]], loc="right")
+        plotter.add_legend([["Neuropixels units", "green"]], loc="center right")
     else:
         print(f"No units found for region {args.region}")
 else:
@@ -573,7 +573,7 @@ else:
             bcolor=(1, 1, 1),
             face="circle",
             size=(0.25, 0.8),
-            loc="right",
+            loc="center right",
         )
     else:
         print("No units found in any region.")
