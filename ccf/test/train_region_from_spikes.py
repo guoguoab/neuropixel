@@ -63,6 +63,9 @@ def load_labels(units_csv: Path, channels_csv: Path) -> pd.DataFrame:
     units_df = pd.read_csv(units_csv)
     channels_df = pd.read_csv(channels_csv)
 
+    channel_region_count = channels_df["ecephys_structure_acronym"].dropna().nunique()
+    print(f"[labels] channels.csv 中共有 {channel_region_count} 个脑区(acronym)")
+
     merged = units_df.merge(
         channels_df[["id", "ecephys_structure_acronym"]],
         left_on="ecephys_channel_id",
@@ -74,6 +77,10 @@ def load_labels(units_csv: Path, channels_csv: Path) -> pd.DataFrame:
     merged = merged.rename(columns={"id_unit": "unit_id", "ecephys_structure_acronym": "region"})
     merged = merged[["unit_id", "ecephys_channel_id", "quality", "region"]].copy()
     merged = merged.dropna(subset=["unit_id", "region"])
+    merged_region_count = merged["region"].nunique()
+    print(
+        f"[labels] units.csv 与 channels.csv 合并后，实际有标签的脑区数: {merged_region_count}"
+    )
     return merged
 
 
@@ -84,6 +91,7 @@ def load_spike_times_from_nwb(nwb_path: Path) -> Dict[int, np.ndarray]:
     with NWBHDF5IO(str(nwb_path), "r", load_namespaces=True) as io:
         nwbfile = io.read()
         units = nwbfile.units.to_dataframe()
+    print(f"[nwb] NWB units 表中共有 {len(units)} 个unit")
 
     # Expected Allen columns: id, spike_times
     if "spike_times" not in units.columns:
@@ -222,6 +230,10 @@ def main() -> None:
     labels = labels[labels["region"].isin(keep_regions)].copy()
 
     spikes_by_unit = load_spike_times_from_nwb(args.nwb)
+    matched_labels = labels[labels["unit_id"].isin(spikes_by_unit.keys())]
+    matched_region_count = matched_labels["region"].nunique()
+    print(f"[nwb] 与NWB成功匹配的脑区数: {matched_region_count}")
+
     X, y, groups = build_dataset(labels, spikes_by_unit)
 
     model, metrics = train_and_evaluate(
