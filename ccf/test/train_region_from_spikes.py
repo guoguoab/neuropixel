@@ -24,11 +24,14 @@ from typing import Dict, Iterable, List, Tuple
 
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import ExtraTreesClassifier, RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import classification_report, confusion_matrix
 from sklearn.model_selection import GroupShuffleSplit
+from sklearn.neighbors import KNeighborsClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC
 
 
 def parse_args() -> argparse.Namespace:
@@ -175,47 +178,188 @@ def build_dataset(labels_df: pd.DataFrame, spikes_by_unit: Dict[int, np.ndarray]
     return np.vstack(rows), np.array(y), np.array(groups)
 
 
-def train_and_evaluate(
+def build_model_candidates(random_state: int) -> Dict[str, Pipeline]:
+    return {
+        "random_forest": Pipeline(
+            steps=[
+                ("scaler", StandardScaler()),
+                (
+                    "clf",
+                    RandomForestClassifier(
+                        n_estimators=600,
+                        max_depth=None,
+                        min_samples_leaf=2,
+                        class_weight="balanced_subsample",
+                        random_state=random_state,
+                        n_jobs=-1,
+                    ),
+                ),
+            ]
+        ),
+        "extra_trees": Pipeline(
+            steps=[
+                ("scaler", StandardScaler()),
+                (
+                    "clf",
+                    ExtraTreesClassifier(
+                        n_estimators=700,
+                        max_depth=None,
+                        min_samples_leaf=2,
+                        class_weight="balanced",
+                        random_state=random_state,
+                        n_jobs=-1,
+                    ),
+                ),
+            ]
+        ),
+        "svc_rbf": Pipeline(
+            steps=[
+                ("scaler", StandardScaler()),
+                (
+                    "clf",
+                    SVC(
+                        C=5.0,
+                        gamma="scale",
+                        kernel="rbf",
+                        class_weight="balanced",
+                        probability=False,
+                        random_state=random_state,
+                    ),
+                ),
+            ]
+        ),
+        "logistic_regression": Pipeline(
+            steps=[
+                ("scaler", StandardScaler()),
+                (
+                    "clf",
+                    LogisticRegression(
+                        C=2.0,
+                        class_weight="balanced",
+                        max_iter=3000,
+                        multi_class="multinomial",
+                        random_state=random_state,
+                    ),
+                ),
+            ]
+        ),
+        "knn": Pipeline(
+            steps=[
+                ("scaler", StandardScaler()),
+                ("clf", KNeighborsClassifier(n_neighbors=11, weights="distance")),
+            ]
+        ),
+    }
+
+
+def train_and_select_model(
     X: np.ndarray,
     y: np.ndarray,
     groups: np.ndarray,
     test_size: float,
     random_state: int,
-) -> Tuple[Pipeline, dict]:
+) -> Tuple[Pipeline, str, dict, np.ndarray, np.ndarray]:
     splitter = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=random_state)
     train_idx, test_idx = next(splitter.split(X, y, groups=groups))
 
-    model = Pipeline(
-        steps=[
-            ("scaler", StandardScaler()),
-            (
-                "clf",
-                RandomForestClassifier(
-                    n_estimators=500,
-                    max_depth=None,
-                    class_weight="balanced_subsample",
-                    random_state=random_state,
-                    n_jobs=-1,
-                ),
-            ),
-        ]
-    )
+    candidates = build_model_candidates(random_state=random_state)
+    model_results = []
+    best_model = None
+    best_model_name = ""
+    best_pred = None
+    best_score = -1.0
+    best_report = {}
 
-    model.fit(X[train_idx], y[train_idx])
-    pred = model.predict(X[test_idx])
+    for model_name, model in candidates.items():
+        model.fit(X[train_idx], y[train_idx])
+        pred = model.predict(X[test_idx])
+        report = classification_report(y[test_idx], pred, output_dict=True, zero_division=0)
+        weighted_f1 = float(report["weighted avg"]["f1-score"])
+        macro_f1 = float(report["macro avg"]["f1-score"])
+        accuracy = float(report["accuracy"])
 
-    report = classification_report(y[test_idx], pred, output_dict=True, zero_division=0)
+        model_results.append(
+            {
+                "model": model_name,
+                "accuracy": accuracy,
+                "weighted_f1": weighted_f1,
+                "macro_f1": macro_f1,
+            }
+        )
+
+        if weighted_f1 > best_score:
+            best_score = weighted_f1
+            best_model = model
+            best_model_name = model_name
+            best_pred = pred
+            best_report = report
+
+    if best_model is None or best_pred is None:
+        raise RuntimeError("No valid model could be trained.")
+
+    model_results = sorted(model_results, key=lambda x: x["weighted_f1"], reverse=True)
     cm_labels = sorted(set(y[test_idx]))
-    cm = confusion_matrix(y[test_idx], pred, labels=cm_labels)
+    cm = confusion_matrix(y[test_idx], best_pred, labels=cm_labels)
 
     metrics = {
+        "selected_model": best_model_name,
         "n_train": int(train_idx.size),
         "n_test": int(test_idx.size),
+        "candidate_models": model_results,
         "classes_test": cm_labels,
-        "classification_report": report,
+        "classification_report": best_report,
         "confusion_matrix": cm.tolist(),
     }
-    return model, metrics
+    return best_model, best_model_name, metrics, y[test_idx], best_pred
+
+
+def plot_model_comparison(model_results: List[dict], output_dir: Path) -> None:
+    import matplotlib.pyplot as plt
+
+    names = [r["model"] for r in model_results]
+    weighted_f1 = [r["weighted_f1"] for r in model_results]
+    accuracy = [r["accuracy"] for r in model_results]
+
+    x = np.arange(len(names))
+    width = 0.38
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.bar(x - width / 2, weighted_f1, width, label="weighted F1")
+    ax.bar(x + width / 2, accuracy, width, label="accuracy")
+    ax.set_xticks(x)
+    ax.set_xticklabels(names, rotation=20, ha="right")
+    ax.set_ylim(0.0, 1.0)
+    ax.set_ylabel("Score")
+    ax.set_title("Model comparison on held-out test set")
+    ax.grid(axis="y", alpha=0.25)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(output_dir / "model_comparison.png", dpi=160)
+    plt.close(fig)
+
+
+def plot_confusion_matrix(
+    y_true: np.ndarray, y_pred: np.ndarray, labels: List[str], output_dir: Path
+) -> None:
+    import matplotlib.pyplot as plt
+
+    cm = confusion_matrix(y_true, y_pred, labels=labels)
+    row_sum = cm.sum(axis=1, keepdims=True)
+    cm_norm = np.divide(cm, row_sum, out=np.zeros_like(cm, dtype=float), where=row_sum != 0)
+
+    fig, ax = plt.subplots(figsize=(10, 8))
+    im = ax.imshow(cm_norm, interpolation="nearest", aspect="auto", cmap="Blues")
+    ax.set_title("Normalized confusion matrix")
+    ax.set_xlabel("Predicted label")
+    ax.set_ylabel("True label")
+    ax.set_xticks(np.arange(len(labels)))
+    ax.set_yticks(np.arange(len(labels)))
+    ax.set_xticklabels(labels, rotation=60, ha="right", fontsize=8)
+    ax.set_yticklabels(labels, fontsize=8)
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    fig.tight_layout()
+    fig.savefig(output_dir / "confusion_matrix.png", dpi=170)
+    plt.close(fig)
 
 
 def main() -> None:
@@ -236,7 +380,7 @@ def main() -> None:
 
     X, y, groups = build_dataset(labels, spikes_by_unit)
 
-    model, metrics = train_and_evaluate(
+    model, model_name, metrics, y_test, pred_test = train_and_select_model(
         X=X,
         y=y,
         groups=groups,
@@ -261,13 +405,26 @@ def main() -> None:
         "burst_ratio_isi_lt10ms",
         "fano_1s",
     ]
-    importances = model.named_steps["clf"].feature_importances_
+    clf = model.named_steps["clf"]
+    if hasattr(clf, "feature_importances_"):
+        importances = clf.feature_importances_
+    elif hasattr(clf, "coef_"):
+        importances = np.mean(np.abs(clf.coef_), axis=0)
+    else:
+        importances = np.zeros(len(feature_names), dtype=float)
     importance_df = pd.DataFrame(
         {"feature": feature_names, "importance": importances}
     ).sort_values("importance", ascending=False)
     importance_df.to_csv(args.output_dir / "feature_importance.csv", index=False)
 
+    try:
+        plot_model_comparison(metrics["candidate_models"], args.output_dir)
+        plot_confusion_matrix(y_test, pred_test, metrics["classes_test"], args.output_dir)
+    except ModuleNotFoundError as exc:
+        print(f"[warn] plotting skipped because dependency is missing: {exc}")
+
     print("Done. Metrics:")
+    print(f"Selected best model: {model_name}")
     print(json.dumps(metrics, indent=2, ensure_ascii=False))
 
 
